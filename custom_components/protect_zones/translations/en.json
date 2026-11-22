@@ -1,0 +1,25 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Protect Zones",
+        "description": "A companion to the UniFi Protect integration. Adds, for every detection zone, line and loiter zone of your cameras, an event that fires when something is detected in it, and for every detection zone a sensor that is on while something is in it. It uses the connection of the UniFi Protect integration and changes nothing in Protect unless an administrator edits a zone from a dashboard."
+      }
+    },
+    "abort": {
+      "already_configured": "Protect Zones is already set up",
+      "single_instance_allowed": "Protect Zones is already set up",
+      "protect_not_loaded": "Set up the UniFi Protect integration first"
+    }
+  },
+  "issues": {
+    "stream_internals": {
+      "title": "Protect live updates: the UniFi Protect integration changed",
+      "description": "The Protect companions (Protect Zones, Protect Rules, Protect Detections) listen to Protect's live updates through the UniFi Protect integration. Something they rely on there is no longer available: {detail}.\n\nThis usually follows a Home Assistant update. Until the companions are updated to match, zone events, occupancy, rule events and live detections may not work. This message disappears by itself once the live updates work again."
+    },
+    "stream_undecodable": {
+      "title": "Protect live updates can't be read",
+      "description": "The connection to Protect's live updates works, but the updates it sends can no longer be read ({detail}).\n\nThis usually follows a UniFi Protect or Home Assistant update that changed the format. Until the Protect companions are updated to match, zone events, occupancy, rule events and live detections will not work. This message disappears by itself once updates can be read again."
+    }
+  }
+}
