@@ -14,6 +14,8 @@ It only reads from Protect, with one exception: an administrator can edit a zone
 
 > This integration uses the API of the Protect app, which Ubiquiti doesn't document or promise to keep. A UniFi Protect or Home Assistant update can break it until it is updated to match. It is not affiliated with Ubiquiti.
 
+![A camera's zones in Home Assistant: occupancy sensors, an event per zone and the activity they produce](docs/images/device-page.webp)
+
 ## Requirements
 
 - Home Assistant 2026.3 or newer.
