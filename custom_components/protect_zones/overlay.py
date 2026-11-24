@@ -8,13 +8,16 @@ Two websocket commands, for any logged-in user, read-only:
                                        the zone list or a zone's occupancy changes
 
   {"editable": true | false,
-   "cameras": {<Protect camera id>: {"mac", "name", "aligned", "zones": [
+   "cameras": {<Protect camera id>: {"mac", "name", "connected", "aligned", "zones": [
       {"id", "kind": "zone" | "line" | "loiter", "name", "color": "#rrggbb" | null,
        "types": ["person", ...] | null, "dwell": {"person": seconds, ...} | null,
        "points": [[x, y], ...], "occupied": true | false | null, "detected": str | null}]}}}
 
 types: what the zone is set to detect, in Protect's words. dwell: for a
 loiter zone, how many seconds each of them must stay before it counts.
+
+connected: false for a camera that is offline (its zones are still listed,
+with occupied null). A camera removed from Protect is no longer listed.
 
 aligned: true / false for a camera that can move (is it at its home
 position, which is where its zones are taken to have been drawn), null if
@@ -139,6 +142,8 @@ class OverlayHub:
             for mac, cam in ((coordinator.data or {}) if coordinator and api else {}).items():
                 if not cam.get("ptz") or not cam.get("id") or not any(cam[kind] for kind in ("zone", "line", "loiter")):
                     continue
+                if cam.get("connected") is False:
+                    continue  # offline: nothing to ask, and not known
                 try:
                     known = self._homes.get(mac)
                     if known is None or time.monotonic() - known[0] > HOME_EVERY:
@@ -152,6 +157,8 @@ class OverlayHub:
                     _LOGGER.debug("Couldn't read where %s is looking", cam.get("name"), exc_info=True)
                     aligned[mac] = None
             self._aligned_at = time.monotonic()
+            for mac in [m for m in self._homes if m not in aligned]:
+                del self._homes[mac]  # removed, or back later: read its home position afresh
             if aligned != self._aligned:
                 self._aligned = aligned
                 self.changed()

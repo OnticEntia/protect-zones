@@ -14,7 +14,7 @@ so the tests can load this file on its own:
 from __future__ import annotations
 
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Iterable
 import copy
 import math
 import re
@@ -151,11 +151,72 @@ def zone_detects(types: tuple[str, ...] | None, object_type: str) -> bool:
     return object_type in types or _group(object_type) in types
 
 
+def _connected(cam: dict[str, Any]) -> bool:
+    """False only if Protect says the camera isn't connected; if it doesn't
+    say, the camera is taken to be."""
+    if isinstance(cam.get("isConnected"), bool):
+        return cam["isConnected"]
+    if isinstance(cam.get("state"), str):
+        return cam["state"].upper() == "CONNECTED"
+    return True
+
+
+def camera_connected(cameras: dict[str, dict[str, Any]] | None, mac: str) -> bool:
+    """Can this camera report anything now: it is in Protect's list (cameras
+    is parse_cameras' result) and not offline."""
+    cam = (cameras or {}).get(mac)
+    return bool(cam) and cam.get("connected") is not False
+
+
+def gone(
+    registered: Iterable[tuple[str, ...]],
+    current: Collection[tuple[str, ...]],
+    cameras: dict[str, dict[str, Any]],
+    counts: dict[tuple[str, ...], int],
+    reads: int = 2,
+) -> list[tuple[str, ...]]:
+    """Which of the registered entities are for something Protect no longer has.
+
+    Call it once per successful read of the camera list. registered and
+    current are keys that start with the camera's mac and, for a zone's
+    entity, go on with the kind (zone / line / loiter) and the zone id:
+    registered the entities there are, current the ones there should be.
+    counts is kept between calls: a key is returned (and is then to be
+    removed) once `reads` reads in a row had no place for it, so one odd
+    answer can't wipe entities.
+
+    A camera that is offline is still listed, with its zones, so nothing of
+    it is returned. A camera whose answer left a kind of zone out altogether
+    (rather than listing none) says nothing either way about those zones, nor
+    about an entity of the camera as a whole (a key of just the mac).
+    """
+    registered = list(registered)
+    for key in [k for k in counts if k in current or k not in registered]:
+        counts.pop(key)
+    result = []
+    for key in registered:
+        if key in current:
+            continue
+        unsaid = cameras[key[0]]["missing"] if key[0] in cameras else ()
+        if (key[1] in unsaid) if len(key) > 1 else bool(unsaid):
+            continue
+        counts[key] = counts.get(key, 0) + 1
+        if counts[key] >= reads:
+            counts.pop(key)
+            result.append(key)
+    return result
+
+
 def parse_cameras(cameras: Any) -> dict[str, dict[str, Any]]:
     """Protect's camera list -> {camera mac: {"id", "name", "zone": [...],
-    "line": [...], "loiter": [...], "missing": (...), "ptz": bool}}, each zone
-    {"id", "name", "color", "points", "types", "dwell"} (parse_color,
-    parse_points, parse_types, parse_dwell).
+    "line": [...], "loiter": [...], "missing": (...), "ptz": bool,
+    "connected": bool}}, each zone {"id", "name", "color", "points", "types",
+    "dwell"} (parse_color, parse_points, parse_types, parse_dwell).
+
+    A camera that is offline is still in Protect's list, with its zones:
+    "connected" is False for it (camera_connected). One that was removed from
+    Protect is no longer in the list, and one that Protect lists but no
+    longer manages (isAdopted false) is left out here, which is the same.
 
     "missing" names the kinds whose key Protect left out (or sent as something
     other than a list) for that camera: that is "didn't say", which is not the
@@ -167,7 +228,7 @@ def parse_cameras(cameras: Any) -> dict[str, dict[str, Any]]:
         raise ValueError("Protect gave an unexpected answer for the cameras")
     result: dict[str, dict[str, Any]] = {}
     for cam in cameras:
-        if not isinstance(cam, dict) or not cam.get("mac"):
+        if not isinstance(cam, dict) or not cam.get("mac") or cam.get("isAdopted") is False:
             continue
         mac = str(cam["mac"])
         flags = cam.get("featureFlags")
@@ -175,6 +236,7 @@ def parse_cameras(cameras: Any) -> dict[str, dict[str, Any]]:
             "id": cam.get("id"),
             "name": cam.get("name") or mac,
             "ptz": isinstance(flags, dict) and flags.get("isPtz") is True,  # it can move
+            "connected": _connected(cam),
         }
         missing = []
         for kind, key in ZONE_KINDS:
@@ -234,7 +296,7 @@ def overlay_payload(
 ) -> dict[str, Any]:
     """The zones as shapes to draw over each camera's picture:
 
-    {"cameras": {<Protect camera id>: {"mac", "name", "aligned", "zones": [
+    {"cameras": {<Protect camera id>: {"mac", "name", "connected", "aligned", "zones": [
         {"id", "kind", "name", "color", "types", "dwell", "points", "occupied",
          "detected"}]}}}
 
@@ -246,9 +308,10 @@ def overlay_payload(
     detection zone is occupied and by what. Cameras without an id or without
     any zone are left out.
 
-    occupied / detected are None for lines and loiter zones (they have no
-    occupancy) and for every zone while `live` is false (the live stream is
-    down or the zone list is stale, so we can't tell). detected is what is in
+    connected is false for a camera that is offline. occupied / detected are
+    None for lines and loiter zones (they have no occupancy), for the zones
+    of a camera that is offline, and for every zone while `live` is false
+    (the live stream is down or the zone list is stale, so we can't tell). detected is what is in
     the zone ("person", or "person,vehicle" if more than one kind), None if
     it is empty.
 
@@ -263,10 +326,11 @@ def overlay_payload(
         if not cam.get("id"):
             continue
         shapes = []
+        connected = cam.get("connected") is not False
         for kind, _ in ZONE_KINDS:
             for zone in cam.get(kind) or []:
                 occupied = detected = None
-                if kind == "zone" and live:
+                if kind == "zone" and live and connected:
                     occupied, seen = occupancy(mac, zone["id"])
                     occupied = bool(occupied)
                     detected = ",".join(seen) if occupied and seen else None
@@ -287,7 +351,8 @@ def overlay_payload(
             result[str(cam["id"])] = {
                 "mac": mac,
                 "name": cam["name"],
-                "aligned": aligned(mac) if aligned is not None and cam.get("ptz") else None,
+                "connected": connected,
+                "aligned": aligned(mac) if aligned is not None and cam.get("ptz") and connected else None,
                 "zones": shapes,
             }
     return {"cameras": result}
@@ -673,9 +738,12 @@ class ZoneTracker:
         occupants = self._occupants.get((mac, zone_id)) or {}
         return bool(occupants), self._seen(occupants)
 
-    def clear_occupancy(self) -> None:
-        """The stream dropped: we no longer hear who leaves."""
+    def clear_occupancy(self, only: str | None = None) -> None:
+        """The stream dropped, or (only: its mac) one camera went offline or
+        was removed: we no longer hear who leaves."""
         for (mac, zone_id), occupants in list(self._occupants.items()):
+            if only is not None and mac != only:
+                continue
             for event_id in list(occupants):
                 self._set_occupant(mac, zone_id, event_id, None)
 

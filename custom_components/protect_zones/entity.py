@@ -3,6 +3,12 @@
 Zone entities follow Protect: a zone or camera renamed there is renamed here
 (the entity id stays, so automations keep working), and a zone or camera
 deleted there is removed here.
+
+A camera that is offline is still in Protect, with its zones: its entities
+stay and are unavailable until it is back. A camera that was removed from
+Protect (or replaced: the new one has another MAC address) is gone for good:
+its entities and its device are removed, see zone_syncer. Nothing is carried
+over to another camera.
 """
 
 from __future__ import annotations
@@ -19,7 +25,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from . import ProtectZonesConfigEntry, ZonesCoordinator
 from .const import DOMAIN
 from .feed import AVAILABILITY_SIGNAL
-from .zones import zone_key
+from .zones import gone, zone_key
 
 KIND_SUFFIX = {"zone": "", "line": " line", "loiter": " loiter zone"}
 
@@ -55,9 +61,9 @@ class ZoneEntity(Entity):
 
     @property
     def available(self) -> bool:
-        """Not while the live stream is down or the zone list is stale: then
-        we can't tell what happens in the zone."""
-        return self._coordinator.live
+        """Not while the live stream is down, the zone list is stale or the
+        camera is offline: then we can't tell what happens in the zone."""
+        return self._coordinator.camera_live(self._mac)
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
@@ -85,6 +91,17 @@ class ZoneEntity(Entity):
             devices = dr.async_get(self.hass)
             if device := devices.async_get_device(identifiers={(DOMAIN, f"zones_{self._mac}")}):
                 devices.async_update_device(device.id, name=f"Protect Zones {camera}")
+
+
+@callback
+def remove_entity(hass: HomeAssistant, entity_id: str, mac: str) -> None:
+    """Remove an entity of this camera for good, and the camera's device with its last one."""
+    registry = er.async_get(hass)
+    registry.async_remove(entity_id)
+    devices = dr.async_get(hass)
+    device = devices.async_get_device(identifiers={(DOMAIN, f"zones_{mac}")})
+    if device and not er.async_entries_for_device(registry, device.id, include_disabled_entities=True):
+        devices.async_remove_device(device.id)
 
 
 def zone_syncer(
@@ -125,9 +142,8 @@ def zone_syncer(
             async_add_entities(new)
 
         # Deleted in Protect (the zone, or its camera): remove it here too, once
-        # two reads in a row agree, so one odd answer can't wipe entities. A
-        # camera whose answer left this kind of zone out altogether (rather
-        # than listing none) says nothing either way: keep its entities.
+        # two reads in a row agree (zones.py, gone). Until then, and while a
+        # camera is only offline, the entities stay and are unavailable.
         if coordinator.reads == last_read[0]:
             return
         last_read[0] = coordinator.reads
@@ -137,22 +153,8 @@ def zone_syncer(
             # (an "…_occupied" id is not taken for the plain one, or the other way round)
             if (key := zone_key(ent.unique_id, tail)) is not None:
                 registered[key] = ent.entity_id
-        for key in [k for k in missing if k in current or k not in registered]:
-            missing.pop(key)
-        for key, entity_id in registered.items():
-            if key in current:
-                continue
-            if key[0] in cameras and key[1] in cameras[key[0]]["missing"]:
-                continue
-            missing[key] = missing.get(key, 0) + 1
-            if missing[key] < 2:
-                continue
-            missing.pop(key)
+        for key in gone(registered, current, cameras, missing):
             entities.pop(key, None)
-            registry.async_remove(entity_id)
-            devices = dr.async_get(hass)
-            device = devices.async_get_device(identifiers={(DOMAIN, f"zones_{key[0]}")})
-            if device and not er.async_entries_for_device(registry, device.id, include_disabled_entities=True):
-                devices.async_remove_device(device.id)
+            remove_entity(hass, registered[key], key[0])
 
     return sync

@@ -110,7 +110,9 @@ class ZoneEditor:
         coordinator = entries[0].runtime_data
         camera = (coordinator.data or {}).get(mac)
         if not camera or not camera.get("id"):
-            raise ZoneEditError("camera_not_found", "No such camera")
+            raise ZoneEditError(
+                "camera_not_found", f"Protect has no camera {mac}: it was removed, or never was there"
+            )
         api = protect_api(self.hass)
         if api is None:
             raise ZoneEditError("protect_not_loaded", "The UniFi Protect integration isn't loaded")

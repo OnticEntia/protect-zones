@@ -6,8 +6,13 @@
                             (zonesStatus says enter / moving, then leave, or the
                              detection ends)
   - the zone entities can (no longer) be trusted
-                            (the live stream dropped or came back, or the zone
-                             list hasn't been read for too long)
+                            (the live stream dropped or came back, the zone
+                             list hasn't been read for too long, or a camera
+                             went offline, came back or was removed)
+
+It also has the zone list read again at once when Protect says a camera was
+added, removed, went offline or came back, or had its zones changed, so that
+doesn't wait for the next read.
 
 The event and binary sensor entities listen for these signals. What the
 updates mean is worked out in zones.py (ZoneTracker), which needs no Home
@@ -33,6 +38,10 @@ if TYPE_CHECKING:
     from . import ZonesCoordinator
 
 SWEEP_EVERY = timedelta(seconds=10)
+# a camera update that names one of these changes what the zone list says
+CAMERA_KEYS = frozenset(
+    {"state", "isConnected", "isAdopted", "name", "smartDetectZones", "smartDetectLines", "smartDetectLoiterZones"}
+)
 # sent (no arguments) when the entities may have become available or unavailable
 AVAILABILITY_SIGNAL = f"{DOMAIN}_availability"
 
@@ -68,6 +77,7 @@ class ZoneFeed:
             coordinator.camera_by_id, self._send_hit, self._send_occupancy, zone_types=coordinator.zone_types
         )
         self._was_live: bool | None = None
+        self._cameras_live: dict[str, bool] = {}  # camera mac -> could its entities be trusted
         # called (no arguments) when a zone's occupancy or "can we be trusted" changed
         self.on_change: list[Callable[[], None]] = []
         self._unsubs: list[Any] = []
@@ -76,6 +86,7 @@ class ZoneFeed:
         self._unsubs = [
             async_get_stream(self.hass).subscribe(self._handle, self._disconnected, self._connected),
             async_track_time_interval(self.hass, self._sweep, SWEEP_EVERY),
+            self.coordinator.async_add_listener(self._availability),
         ]
         self._availability()
 
@@ -91,6 +102,11 @@ class ZoneFeed:
             if _LOGGER.isEnabledFor(logging.DEBUG):
                 _LOGGER.debug("event %s %s: %s", action.get("action"), action.get("id"), _brief(data))
             self._tracker.detection(action.get("id") or data.get("id"), data)
+        elif action.get("modelKey") == "camera" and (
+            action.get("action") in ("add", "remove") or (isinstance(data, dict) and not CAMERA_KEYS.isdisjoint(data))
+        ):
+            # (requests close together are answered by one read)
+            self.hass.async_create_task(self.coordinator.async_request_refresh())
 
     @callback
     def _send_hit(self, mac: str, kind: str, zone_id: int, event_type: str, attrs: dict[str, Any]) -> None:
@@ -128,9 +144,17 @@ class ZoneFeed:
 
     @callback
     def _availability(self) -> None:
-        """Tell the entities if "can we be trusted" changed."""
+        """Tell the entities if "can we be trusted" changed, for all or for a camera."""
         live = self.coordinator.live
-        if live != self._was_live:
-            self._was_live = live
+        known = set(self.coordinator.data or {}) | set(self._cameras_live)
+        cameras = {mac: self.coordinator.camera_live(mac) for mac in known}
+        for mac, now in cameras.items():
+            if not now and self._cameras_live.get(mac):
+                # offline or removed: we won't hear what leaves its zones
+                self._tracker.clear_occupancy(mac)
+        changed = live != self._was_live or cameras != self._cameras_live
+        self._was_live = live
+        self._cameras_live = {mac: now for mac, now in cameras.items() if mac in (self.coordinator.data or {})}
+        if changed:
             async_dispatcher_send(self.hass, AVAILABILITY_SIGNAL)
             self._changed()

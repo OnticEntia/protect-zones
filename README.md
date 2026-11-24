@@ -49,7 +49,14 @@ Each camera with zones becomes a device named "Protect Zones <camera name>". Its
 | Binary sensor (occupancy) | every detection zone | "<zone> occupied" | Attributes: `zone`, `camera`, `detected` (what the detections in the zone have seen) |
 | Binary sensor | every PTZ camera with zones | "At home position" | Attributes: `pan`, `tilt`, `zoom` in the camera's own steps. Asks Protect for the position every 5 seconds |
 
-The entities are unavailable while the live connection to Protect is down or the zone list could not be read for a while.
+The entities are unavailable while the live connection to Protect is down, the zone list could not be read for a while, or their camera is offline.
+
+### Cameras that go offline, are removed or are replaced
+
+- **Offline**: Protect still lists the camera and its zones. Its entities stay and are unavailable until the camera is back; nothing needs doing.
+- **Removed from Protect**: the camera's entities and its "Protect Zones" device are removed from Home Assistant once two reads of the camera list in a row agree that it is gone (within about five minutes). Until then they are unavailable. Automations that used them will point at entities that no longer exist.
+- **Replaced by another camera**: the new camera has its own MAC address, so it gets new entities for the zones drawn on it. Nothing is carried over from the old camera.
+- **Newly adopted**: its entities appear without a restart, shortly after its first zone is drawn.
 
 ### What the zones can and can't tell you
 
@@ -76,6 +83,7 @@ For any logged-in user, read-only:
     "<Protect camera id>": {
       "mac": "AABBCCDDEEFF",
       "name": "Front Door",
+      "connected": true,
       "aligned": null,
       "zones": [
         {
@@ -95,7 +103,7 @@ For any logged-in user, read-only:
 }
 ```
 
-`aligned` is `true` or `false` for a PTZ camera (is it at its home position) and `null` otherwise. `editable` says whether the user asking is an administrator.
+`connected` is `false` for a camera that is offline. `aligned` is `true` or `false` for a PTZ camera (is it at its home position) and `null` otherwise. `editable` says whether the user asking is an administrator.
 
 ### Editing zones
 

@@ -37,6 +37,7 @@ class ParseCameras(unittest.TestCase):
                     "id": "cam1",
                     "name": "Front",
                     "ptz": False,
+                    "connected": True,
                     "zone": [
                         {"id": 1, "name": "Drive", "color": "#ab46bc", "points": [[0.0, 0.0], [1.0, 0.0], [0.5, 0.25]], "types": None, "dwell": None},
                         {"id": 2, "name": "#2", "color": None, "points": [], "types": None, "dwell": None},
@@ -136,6 +137,7 @@ class Overlay(unittest.TestCase):
                     "cam1": {
                         "mac": MAC,
                         "name": "Front",
+                        "connected": True,
                         "aligned": None,
                         "zones": [
                             {
@@ -904,12 +906,135 @@ class Tracker(unittest.TestCase):
         self.tracker.clear_occupancy()
         self.assertEqual(len(self.occupancy), 4)
 
+    def test_clear_occupancy_of_one_camera(self):
+        self.cameras["cam2"] = (OTHER, "Back")
+        self.add(smartDetectTypes=["person"], metadata={"zonesStatus": {"1": {"status": "enter"}}})
+        self.add("e2", camera="cam2", smartDetectTypes=["person"], metadata={"zonesStatus": {"1": {"status": "enter"}}})
+        del self.occupancy[:]
+        self.tracker.clear_occupancy(OTHER)  # it went offline, or was removed
+        self.assertEqual(self.occupancy, [(OTHER, 1, False, [])])
+        self.assertEqual(self.tracker.occupancy(MAC, 1), (True, ["person"]))
+
+    def test_a_detection_of_a_removed_camera_is_ignored(self):
+        self.add(smartDetectTypes=["person"], metadata={"zonesStatus": {"1": {"status": "enter"}}})
+        del self.cameras["cam1"]  # removed from Protect
+        del self.hits[:], self.occupancy[:]
+        self.tracker.detection("e1", {"metadata": {"zonesStatus": {"2": {"status": "enter"}}}})
+        self.add("e2", smartDetectTypes=["person"], metadata={"zonesStatus": {"1": {"status": "enter"}}})
+        self.tracker.sweep()
+        self.assertEqual((self.hits, self.occupancy), ([], []))
+
     def test_remembers_a_limited_number_of_detections(self):
         for n in range(zones.REMEMBER_EVENTS + 1):
             self.add(f"e{n}", smartDetectTypes=["person"])
         self.tracker.detection("e0", {"metadata": {"zonesStatus": {"1": {"status": "enter"}}}})  # forgotten
         self.tracker.detection("e1", {"metadata": {"zonesStatus": {"1": {"status": "enter"}}}})
         self.assertEqual([h[4]["detection_event_id"] for h in self.hits], ["e1"])
+
+
+
+OTHER = "112233445566"
+
+
+def camera(mac, cam_id, **more):
+    return {"mac": mac, "id": cam_id, "name": cam_id, "smartDetectZones": [{"id": 1, "name": "Yard"}], "smartDetectLines": [], "smartDetectLoiterZones": [], **more}
+
+
+class OfflineCamera(unittest.TestCase):
+    """Offline: still in Protect's list, with its zones. Everything is kept."""
+
+    def test_connected_unless_protect_says_otherwise(self):
+        for more, expected in (
+            ({}, True),
+            ({"isConnected": True}, True),
+            ({"isConnected": False}, False),
+            ({"state": "CONNECTED"}, True),
+            ({"state": "DISCONNECTED"}, False),
+            ({"state": "CONNECTING"}, False),
+            ({"isConnected": True, "state": "DISCONNECTED"}, True),
+            ({"isConnected": None, "state": 7}, True),
+        ):
+            got = zones.parse_cameras([camera(MAC, "cam1", **more)])
+            self.assertIs(got[MAC]["connected"], expected, more)
+            self.assertIs(zones.camera_connected(got, MAC), expected, more)
+            self.assertEqual([z["id"] for z in got[MAC]["zone"]], [1], "its zones are still read")
+
+    def test_nothing_of_an_offline_camera_is_removed(self):
+        cameras = zones.parse_cameras([camera(MAC, "cam1", isConnected=False)])
+        keys = [(MAC, "zone", 1), (MAC,)]
+        counts = {}
+        for _ in range(5):
+            self.assertEqual(zones.gone(keys, keys, cameras, counts), [])
+        self.assertEqual(counts, {})
+
+    def test_overlay_shows_it_as_not_connected_and_its_zones_as_unknown(self):
+        cameras = zones.parse_cameras([camera(MAC, "cam1", isConnected=False, featureFlags={"isPtz": True})])
+        entry = zones.overlay_payload(cameras, lambda mac, zid: (True, ["person"]), True, lambda mac: True)["cameras"]["cam1"]
+        self.assertIs(entry["connected"], False)
+        self.assertIsNone(entry["aligned"])
+        self.assertEqual([(z["occupied"], z["detected"]) for z in entry["zones"]], [(None, None)])
+
+
+class RemovedCamera(unittest.TestCase):
+    """Removed: no longer in Protect's list. Its entities go, after two reads agree."""
+
+    def setUp(self):
+        self.both = zones.parse_cameras([camera(MAC, "cam1"), camera(OTHER, "cam2")])
+        self.one = zones.parse_cameras([camera(MAC, "cam1")])
+        self.registered = [(MAC, "zone", 1), (MAC,), (OTHER, "zone", 1), (OTHER,)]
+        self.counts = {}
+
+    def current(self, cameras):
+        return {(mac, "zone", z["id"]) for mac, cam in cameras.items() for z in cam["zone"]} | {(mac,) for mac in cameras}
+
+    def gone(self, cameras):
+        return zones.gone(self.registered, self.current(cameras), cameras, self.counts)
+
+    def test_not_connected_and_not_in_the_list(self):
+        self.assertFalse(zones.camera_connected(self.one, OTHER))
+        self.assertFalse(zones.camera_connected(None, OTHER))
+        self.assertFalse(zones.camera_connected({}, OTHER))
+
+    def test_removed_after_two_reads_in_a_row(self):
+        self.assertEqual(self.gone(self.both), [])
+        self.assertEqual(self.gone(self.one), [])
+        self.assertEqual(self.gone(self.one), [(OTHER, "zone", 1), (OTHER,)])
+        self.assertEqual(self.counts, {})
+
+    def test_one_odd_answer_removes_nothing(self):
+        for _ in range(3):
+            self.assertEqual(self.gone(self.one), [])
+            self.assertEqual(self.gone(self.both), [])
+        self.assertEqual(self.counts, {})
+
+    def test_a_camera_protect_no_longer_manages_counts_as_removed(self):
+        cameras = zones.parse_cameras([camera(MAC, "cam1"), camera(OTHER, "cam2", isAdopted=False)])
+        self.assertEqual(cameras, self.one)
+
+    def test_a_replacement_is_another_camera(self):
+        """A new device has another mac and id: nothing of the old one is carried over."""
+        new = "AABBCC000001"
+        cameras = zones.parse_cameras([camera(MAC, "cam1"), camera(new, "cam3")])
+        self.gone(cameras)
+        self.assertEqual(self.gone(cameras), [(OTHER, "zone", 1), (OTHER,)])
+        self.assertNotIn(OTHER, cameras)
+        self.assertEqual(self.current(cameras) - set(self.registered), {(new, "zone", 1), (new,)})
+
+    def test_a_camera_that_does_not_say_keeps_its_entities(self):
+        """Its answer left the zones out altogether, rather than listing none."""
+        silent = zones.parse_cameras([camera(MAC, "cam1"), {"mac": OTHER, "id": "cam2", "name": "cam2"}])
+        current = {(MAC, "zone", 1), (MAC,)}
+        for _ in range(3):
+            self.assertEqual(zones.gone(self.registered, current, silent, self.counts), [])
+
+    def test_a_zone_deleted_from_a_camera_that_stays(self):
+        cameras = zones.parse_cameras([camera(MAC, "cam1"), camera(OTHER, "cam2", smartDetectZones=[])])
+        current = {(MAC, "zone", 1), (MAC,), (OTHER,)}
+        zones.gone(self.registered, current, cameras, self.counts)
+        self.assertEqual(zones.gone(self.registered, current, cameras, self.counts), [(OTHER, "zone", 1)])
+
+    def test_overlay_leaves_it_out(self):
+        self.assertEqual(list(zones.overlay_payload(self.one, lambda mac, zid: (False, []), True)["cameras"]), ["cam1"])
 
 
 if __name__ == "__main__":

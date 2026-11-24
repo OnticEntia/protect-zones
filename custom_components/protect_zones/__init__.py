@@ -39,7 +39,7 @@ from .feed import ZoneFeed
 from . import edit, overlay
 from .overlay import async_get_hub
 from .stream import async_get_stream, protect_api
-from .zones import parse_cameras
+from .zones import camera_connected, parse_cameras
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -90,6 +90,11 @@ class ZonesCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         the zone list was read not long ago."""
         fresh = self.read_at is not None and time.monotonic() - self.read_at < STALE_AFTER
         return fresh and async_get_stream(self.hass).connected
+
+    def camera_live(self, mac: str) -> bool:
+        """Can this camera's entities be trusted: `live`, and the camera is in
+        Protect and not offline."""
+        return self.live and camera_connected(self.data, mac)
 
     def camera_by_id(self, camera_id: str | None) -> tuple[str, str] | None:
         """(mac, name) of the camera with this Protect id."""
